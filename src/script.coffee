@@ -1,16 +1,39 @@
 $ = (sel) -> document.querySelector sel
 
+allowedImageExt = /\.(png|jpe?g|gif|webp|bmp)$/i
+
 inputItems = ['text', 'color', 'alpha', 'angle', 'space', 'size']
 input = {}
 
-image = $ '#image'
+imageInput = $ '#image'
 graph = $ '#graph'
 refresh = $ '#refresh'
 autoRefresh = $ '#auto-refresh'
-file = null
-canvas = null
-textCtx = null
-redraw = null
+downloadAll = $ '#download-all'
+clearAll = $ '#clear-all'
+countEl = $ '#count'
+
+items = []
+
+pad2 = (n) -> if n < 10 then '0' + n else '' + n
+
+formatTimestamp = ->
+    d = new Date
+    '' + d.getFullYear() + '-' + (pad2 d.getMonth() + 1) + '-' + (pad2 d.getDate()) + ' ' + \
+        (pad2 d.getHours()) + (pad2 d.getMinutes()) + (pad2 d.getSeconds())
+
+stripExt = (name) ->
+    return '' if not name?
+    name.replace /\.[^/.]+$/, ''
+
+sanitizeBaseName = (name) ->
+    (name or '').replace(/[\\/:*?"<>|]/g, '-').trim()
+
+isSupportedImageFile = (file) ->
+    return false if not file?
+    return true if file.type? and file.type.indexOf('image/') == 0
+    return true if allowedImageExt.test(file.name or '')
+    false
 
 dataURItoBlob = (dataURI) ->
     binStr = atob (dataURI.split ',')[1]
@@ -21,117 +44,234 @@ dataURItoBlob = (dataURI) ->
         arr[i] = binStr.charCodeAt i
     new Blob [arr], type: 'image/png'
 
+canvasToBlob = (canvas) ->
+    new Promise (resolve, reject) ->
+        if canvas?.toBlob?
+            canvas.toBlob ((blob) ->
+                if blob? then resolve(blob) else reject new Error 'toBlob failed'
+            ), 'image/png'
+        else
+            try
+                resolve dataURItoBlob canvas.toDataURL 'image/png'
+            catch err
+                reject err
 
-generateFileName = ->
-    pad = (n) -> if n < 10 then '0' + n else n
+downloadBlob = (blob, filename) ->
+    url = URL.createObjectURL blob
+    link = document.createElement 'a'
+    link.download = filename
+    link.href = url
+    document.body.appendChild link
 
-    d = new Date
-    '' + d.getFullYear() + '-' + (pad d.getMonth() + 1) + '-' + (pad d.getDate()) + ' ' + \
-        (pad d.getHours()) + (pad d.getMinutes()) + (pad d.getSeconds()) + '.png'
+    link.click()
 
+    setTimeout ->
+        URL.revokeObjectURL url
+        document.body.removeChild link
+    , 1000
 
-readFile = ->
-    return if not file?
+readAsDataURL = (file) ->
+    new Promise (resolve, reject) ->
+        fileReader = new FileReader
+        fileReader.onload = -> resolve fileReader.result
+        fileReader.onerror = -> reject fileReader.error or new Error 'FileReader error'
+        fileReader.readAsDataURL file
 
-    fileReader = new FileReader
+loadImageFromFile = (file) ->
+    readAsDataURL(file).then (dataURL) ->
+        new Promise (resolve, reject) ->
+            img = new Image
+            img.onload = -> resolve img
+            img.onerror = -> reject new Error '图片加载失败'
+            img.src = dataURL
 
-    fileReader.onload = ->
-        img = new Image
-        img.onload = ->
-            canvas = document.createElement 'canvas'
-            canvas.width = img.width
-            canvas.height = img.height
-            textCtx = null
-            
-            ctx = canvas.getContext '2d'
-            ctx.drawImage img, 0, 0
+getOptions = ->
+    text: (input.text.value or '').trim()
+    color: input.color.value
+    alpha: parseFloat input.alpha.value
+    angle: parseFloat input.angle.value
+    space: parseFloat input.space.value
+    size: parseFloat input.size.value
 
-            redraw = ->
-                ctx.clearRect 0, 0, canvas.width, canvas.height
-                ctx.drawImage img, 0, 0
-            
-            drawText()
-
-            graph.innerHTML = ''
-            graph.appendChild canvas
-
-            canvas.addEventListener 'click', ->
-                link = document.createElement 'a'
-                link.download = generateFileName()
-                imageData = canvas.toDataURL 'image/png'
-                blob = dataURItoBlob imageData
-                link.href = URL.createObjectURL blob
-                graph.appendChild link
-
-                setTimeout ->
-                    link.click()
-                    graph.removeChild link
-                , 100
-                
-
-
-        img.src = fileReader.result
-
-    fileReader.readAsDataURL file
-    
-
-makeStyle = ->
-    match = input.color.value.match /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i
-
+makeStyle = (color, alpha) ->
+    match = (color or '').match /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i
+    return 'rgba(0,0,0,' + alpha + ')' if not match?
     'rgba(' + (parseInt match[1], 16) + ',' + (parseInt match[2], 16) + ',' \
-         + (parseInt match[3], 16) + ',' + input.alpha.value + ')'
+        + (parseInt match[3], 16) + ',' + alpha + ')'
 
+applyWatermark = (item, options) ->
+    return if not item?.canvas?
+    item.redraw()
+    return if not options.text
 
-drawText = ->
-    return if not canvas?
-    textSize = input.size.value * Math.max 15, (Math.min canvas.width, canvas.height) / 25
-    
-    if textCtx?
-        redraw()
-    else
-        textCtx = canvas.getContext '2d'
-    
-    textCtx.save()
-    textCtx.translate(canvas.width / 2, canvas.height / 2)
-    textCtx.rotate (input.angle.value) * Math.PI / 180
+    canvas = item.canvas
+    ctx = item.ctx
 
-    textCtx.fillStyle = makeStyle()
-    textCtx.font = 'bold ' + textSize + 'px -apple-system,"Helvetica Neue",Helvetica,Arial,"PingFang SC","Hiragino Sans GB","WenQuanYi Micro Hei",sans-serif'
-    
-    width = (textCtx.measureText input.text.value).width
+    textSize = options.size * Math.max 15, (Math.min canvas.width, canvas.height) / 25
+
+    ctx.save()
+    ctx.translate(canvas.width / 2, canvas.height / 2)
+    ctx.rotate options.angle * Math.PI / 180
+
+    ctx.fillStyle = makeStyle options.color, options.alpha
+    ctx.font = 'bold ' + textSize + 'px -apple-system,"Helvetica Neue",Helvetica,Arial,"PingFang SC","Hiragino Sans GB","WenQuanYi Micro Hei",sans-serif'
+
+    width = (ctx.measureText options.text).width
     step = Math.sqrt (Math.pow canvas.width, 2) + (Math.pow canvas.height, 2)
-    margin = (textCtx.measureText '啊').width
+    margin = (ctx.measureText '啊').width
 
     x = Math.ceil step / (width + margin)
-    y = Math.ceil (step / (input.space.value * textSize)) / 2
+    y = Math.ceil (step / (options.space * textSize)) / 2
 
     for i in [-x..x]
         for j in [-y..y]
-            textCtx.fillText input.text.value, (width + margin) * i, input.space.value * textSize * j
-    
-    textCtx.restore()
+            ctx.fillText options.text, (width + margin) * i, options.space * textSize * j
+
+    ctx.restore()
     return
 
+applyAll = ->
+    options = getOptions()
+    items.forEach (item) -> applyWatermark item, options
 
-image.addEventListener 'change', ->
-    file = @files[0]
+updateActions = ->
+    if countEl?
+        if items.length > 0
+            countEl.textContent = '已添加 ' + items.length + ' 张图片'
+        else
+            countEl.textContent = ''
 
-    return alert '仅支持 png, jpg, gif 图片格式' if file.type not in ['image/png', 'image/jpeg', 'image/gif']
-    readFile()
+    if downloadAll?
+        if items.length > 0 then downloadAll.removeAttribute 'disabled' else downloadAll.setAttribute 'disabled', 'disabled'
+    if clearAll?
+        if items.length > 0 then clearAll.removeAttribute 'disabled' else clearAll.setAttribute 'disabled', 'disabled'
 
+makeItemName = (file, fallbackBase) ->
+    base = sanitizeBaseName stripExt(file?.name) or fallbackBase or 'image'
+    base
+
+addImageItem = (img, meta = {}) ->
+    canvas = document.createElement 'canvas'
+    canvas.width = img.width
+    canvas.height = img.height
+
+    ctx = canvas.getContext '2d'
+    ctx.drawImage img, 0, 0
+
+    redraw = ->
+        ctx.clearRect 0, 0, canvas.width, canvas.height
+        ctx.drawImage img, 0, 0
+
+    item =
+        id: '' + Date.now() + '-' + Math.random().toString(16).slice(2)
+        img: img
+        canvas: canvas
+        ctx: ctx
+        redraw: redraw
+        baseName: meta.baseName
+        displayName: meta.displayName
+
+    wrapper = document.createElement 'div'
+    wrapper.className = 'img-item'
+
+    nameEl = document.createElement 'div'
+    nameEl.className = 'img-name'
+    nameEl.textContent = item.displayName or item.baseName or '图片'
+
+    wrapper.appendChild nameEl
+    wrapper.appendChild canvas
+    graph.appendChild wrapper
+
+    canvas.addEventListener 'click', ->
+        downloadOne item
+
+    items.push item
+    updateActions()
+    applyWatermark item, getOptions()
+    return
+
+downloadOne = (item, batchStamp = null, index = null) ->
+    stamp = batchStamp or formatTimestamp()
+    base = item.baseName or 'image'
+    suffix = if index? then '-' + (index + 1) else ''
+    filename = base + suffix + '-' + stamp + '.png'
+
+    canvasToBlob(item.canvas).then (blob) ->
+        downloadBlob blob, filename
+    .catch (err) ->
+        console.error err
+        alert '导出失败，请重试'
+
+addFile = (file, meta = {}) ->
+    return if not isSupportedImageFile file
+
+    loadImageFromFile(file).then (img) ->
+        baseName = meta.baseName or makeItemName file, 'clipboard'
+        displayName = meta.displayName or (file.name or baseName)
+        addImageItem img, baseName: baseName, displayName: displayName
+    .catch (err) ->
+        console.error err
+        alert '读取图片失败'
+
+addFiles = (files) ->
+    Array.from(files or []).forEach (file) ->
+        if isSupportedImageFile file
+            addFile file
+        else
+            alert '仅支持图片文件（png/jpg/gif/webp/bmp 等）'
+
+imageInput?.addEventListener 'change', ->
+    addFiles @files
+    @value = ''
+
+document.addEventListener 'paste', (e) ->
+    data = e.clipboardData
+    return if not data?.items?.length
+
+    pasted = []
+    for it in data.items when it.kind == 'file'
+        f = it.getAsFile()
+        pasted.push f if f?
+
+    return if pasted.length == 0
+    
+    stamp = formatTimestamp()
+    for f, idx in pasted
+        baseName = 'clipboard'
+        displayName = '剪贴板-' + stamp + '-' + (idx + 1)
+        addFile f, baseName: baseName, displayName: displayName
+
+autoRefresh?.addEventListener 'change', ->
+    if @checked
+        refresh.setAttribute 'disabled', 'disabled'
+    else
+        refresh.removeAttribute 'disabled'
 
 inputItems.forEach (item) ->
     el = $ '#' + item
     input[item] = el
-
-    autoRefresh.addEventListener 'change', ->
-        if @checked
-            refresh.setAttribute 'disabled', 'disabled'
-        else
-            refresh.removeAttribute 'disabled'
-    
     el.addEventListener 'input', ->
-        drawText() if autoRefresh.checked
+        applyAll() if autoRefresh.checked
 
-    refresh.addEventListener 'click', drawText
+refresh?.addEventListener 'click', applyAll
 
+downloadAll?.addEventListener 'click', ->
+    return if items.length == 0
+    stamp = formatTimestamp()
+
+    downloadNext = (idx) ->
+        return if idx >= items.length
+        downloadOne(items[idx], stamp, idx).then (->
+            setTimeout (-> downloadNext idx + 1), 200
+        ).catch (->
+            setTimeout (-> downloadNext idx + 1), 200
+        )
+
+    downloadNext 0
+
+clearAll?.addEventListener 'click', ->
+    items.length = 0
+    graph.innerHTML = ''
+    updateActions()
+
+updateActions()

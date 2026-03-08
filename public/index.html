@@ -23,14 +23,18 @@
         input[type=range] { width: 200px; height: 18px; }
 
         canvas { box-sizing: border-box; width: 100%; border: 1px dashed #AAA; cursor: pointer }
+
+        #graph { display: grid; gap: 12px; }
+        .img-name { font-size: 12px; color: #777; margin: 0 0 6px 0; word-break: break-all }
     </style>
 </head>
     <div id="container">
         <h1>图片水印打码工具</h1>
         <article>安全地为你的图片加水印，无任何网络请求，特别适合各种敏感证件（身份证，驾照，护照等）。<a href="https://github.com/joyqi/sfz">Github地址</a></article>
 
-        <label for="image">第一步：先选择一张本地图片</label>
-        <p><input type="file" id="image" autocomplete="off"></p>
+        <label for="image">第一步：选择多张本地图片（或直接粘贴）</label>
+        <p><input type="file" id="image" autocomplete="off" accept="image/*" multiple></p>
+        <article>你也可以从网页复制图片后，在此页面按 Ctrl/⌘ + V 直接粘贴。</article>
 
         
         <label for="text">第二步：输入需要打水印的文字</label>
@@ -57,8 +61,11 @@
             <label for="auto-refresh">实时刷新</label>
             <input type="checkbox" id="auto-refresh" autocomplete="off" checked>
             <button id="refresh" disabled>刷新</button>
+            <button id="download-all" disabled>下载全部</button>
+            <button id="clear-all" disabled>清空图片</button>
+            <span id="count"></span>
         </p>
-        <p id="graph"></p>
+        <div id="graph"></div>
     </div>
     <script src="./script.js"></script>
     <!-- placeholder -->
